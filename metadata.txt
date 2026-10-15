@@ -1,6 +1,7 @@
 [general]
 name=Slope Hachures (Böschungsschraffen)
 qgisMinimumVersion=3.22
+qgisMaximumVersion=3.99
 description=Engineering slope hachures and embankment ticks (RE 2012, OKSTRA 0486, DIN 2425)
 version=1.1.0
 author=perlde
@@ -10,7 +11,7 @@ tracker=https://github.com/perlde/slope_hachures/issues
 repository=https://github.com/perlde/slope_hachures
 tags=slope, hachures, hatching, embankment, slope ticks, talud, talus, böschung, böschungsschraffen, schraffen, falllinien, trassierung, vermessung, erdbau, tiefbau, baugrube, okstra, din 2425, civil engineering, surveying, cad
 category=Vector
-icon=icon.svg
+icon=icon.png
 experimental=False
 deprecated=False
-has_processing_provider=True
+hasProcessingProvider=True

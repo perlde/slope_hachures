@@ -18,7 +18,6 @@ class SlopeProcessingProvider(QgsProcessingProvider):
         self.addAlgorithm(SlopeHachuresAlgorithm())
 
     def id(self) -> str:
-        # Saubere, einheitliche interne ID
         return 'slope_hachures'
 
     def name(self) -> str:
@@ -28,7 +27,8 @@ class SlopeProcessingProvider(QgsProcessingProvider):
 
     def icon(self) -> QIcon:
         plugin_dir = os.path.dirname(os.path.dirname(__file__))
-        icon_path = os.path.join(plugin_dir, 'icon.svg')
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
+        for filename in ('icon.svg', 'icon.png'):
+            path = os.path.join(plugin_dir, filename)
+            if os.path.exists(path):
+                return QIcon(path)
         return super().icon()

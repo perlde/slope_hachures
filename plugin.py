@@ -37,16 +37,25 @@ class BoeschungPlugin:
             return de_map.get(message, message)
         return message
 
+    def _get_icon(self) -> QIcon:
+        """Sucht nach SVG (bevorzugt) oder PNG als Fallback."""
+        plugin_dir = os.path.dirname(__file__)
+        for filename in ('icon.svg', 'icon.png'):
+            path = os.path.join(plugin_dir, filename)
+            if os.path.exists(path):
+                return QIcon(path)
+        return QIcon()
+
     def initProcessing(self):
-        self.provider = SlopeProcessingProvider()
-        QgsApplication.processingRegistry().addProvider(self.provider)
+        """Initialisiert den Processing-Provider (mit Doppel-Registrierungs-Schutz)."""
+        if self.provider is None:
+            self.provider = SlopeProcessingProvider()
+            QgsApplication.processingRegistry().addProvider(self.provider)
 
     def initGui(self):
         self.initProcessing()
 
-        plugin_dir = os.path.dirname(__file__)
-        icon_path = os.path.join(plugin_dir, 'icon.svg')
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        icon = self._get_icon()
 
         self.action = QAction(icon, self.tr('Generate Slope Hachures...'), self.iface.mainWindow())
         self.action.setStatusTip(self.tr('Open dialog to generate engineering slope hachures'))
@@ -68,5 +77,5 @@ class BoeschungPlugin:
             self.provider = None
 
     def run(self):
-        # Synchron zur neuen Provider-ID 'slope_hachures'
+        # Synchron zur Provider-ID 'slope_hachures' und Algorithmus 'generate_slope_hachures'
         processing.execAlgorithmDialog('slope_hachures:generate_slope_hachures')
