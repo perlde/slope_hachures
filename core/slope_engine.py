@@ -167,16 +167,16 @@ class SlopeEngine:
                     p_start_i = ok_geom.interpolate(s_ok).asPoint()
                     v1_x = p_target.x() - p_start_i.x()
                     v1_y = p_target.y() - p_start_i.y()
-                    l1 = math.hypot(v1_x, v1_y)
+                    length1 = math.hypot(v1_x, v1_y)
 
                     next_p_start = ok_geom.interpolate(next_s_ok).asPoint()
                     v2_x = next_p_target.x() - next_p_start.x()
                     v2_y = next_p_target.y() - next_p_start.y()
-                    l2 = math.hypot(v2_x, v2_y)
+                    length2 = math.hypot(v2_x, v2_y)
 
-                    if l1 > 0.05 and l2 > 0.05:
-                        u1_x, u1_y = v1_x / l1, v1_y / l1
-                        u2_x, u2_y = v2_x / l2, v2_y / l2
+                    if length1 > 0.05 and length2 > 0.05:
+                        u1_x, u1_y = v1_x / length1, v1_y / length1
+                        u2_x, u2_y = v2_x / length2, v2_y / length2
                         avg_ux = (u1_x + u2_x) / 2.0
                         avg_uy = (u1_y + u2_y) / 2.0
                         avg_u_len = math.hypot(avg_ux, avg_uy)
@@ -184,7 +184,7 @@ class SlopeEngine:
                         if avg_u_len > 0.001:
                             avg_ux /= avg_u_len
                             avg_uy /= avg_u_len
-                            avg_full_len = (l1 + l2) / 2.0
+                            avg_full_len = (length1 + length2) / 2.0
                             draw_len = avg_full_len * self.short_ratio
 
                             if draw_len >= self.min_short_length:
@@ -519,8 +519,8 @@ class SlopeEngine:
 
         dx = p2.x() - p1.x()
         dy = p2.y() - p1.y()
-        l = math.hypot(dx, dy)
-        return (-dy / l, dx / l) if l > 0 else None
+        length = math.hypot(dx, dy)
+        return (-dy / length, dx / length) if length > 0 else None
 
     def _enforce_monotonicity(
         self,
@@ -585,8 +585,8 @@ class SlopeEngine:
         p2 = geom.interpolate(s2).asPoint()
         dx = p2.x() - p1.x()
         dy = p2.y() - p1.y()
-        l = math.hypot(dx, dy)
-        return (dx / l, dy / l) if l > 0 else None
+        length = math.hypot(dx, dy)
+        return (dx / length, dy / length) if length > 0 else None
 
     def _is_near_any_kehle(
         self,
