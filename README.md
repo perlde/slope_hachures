@@ -2,6 +2,7 @@
 
 [![QGIS Version](https://img.shields.io/badge/QGIS-3.22%2B-brightgreen.svg)](https://qgis.org)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Development-F16061?logo=ko-fi&logoColor=white)](https://ko-fi.com/perlde)
 
 A high-precision, professional QGIS Processing plugin for creating cartographic **slope hachures** (embankment ticks / Taludschraffur) from crest and toe lines according to civil engineering standards (**RE 2012**, **OKSTRA 0486**, **DIN 2425 / 18702**).
 
@@ -65,3 +66,12 @@ A high-precision, professional QGIS Processing plugin for creating cartographic 
 ## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPLv3)**. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## Support & Sponsorship
+
+If this plugin saves you billable project hours or helps your surveying office, consider supporting its maintenance:
+👉 [Support on Ko-fi](https://ko-fi.com/perlde).
+
+---
