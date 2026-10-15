@@ -608,16 +608,16 @@ class SlopeEngine:
             return pts
 
         flat_type = QgsWkbTypes.flatType(geom.wkbType())
-        if flat_type == QgsWkbTypes.Point:
+        if flat_type == QgsWkbTypes.Type.Point:
             pts.append(geom.asPoint())
-        elif flat_type == QgsWkbTypes.MultiPoint:
+        elif flat_type == QgsWkbTypes.Type.MultiPoint:
             pts.extend(geom.asMultiPoint())
-        elif flat_type == QgsWkbTypes.LineString:
+        elif flat_type == QgsWkbTypes.Type.LineString:
             pts.extend(geom.asPolyline())
-        elif flat_type == QgsWkbTypes.MultiLineString:
+        elif flat_type == QgsWkbTypes.Type.MultiLineString:
             for line in geom.asMultiPolyline():
                 pts.extend(line)
-        elif flat_type == QgsWkbTypes.GeometryCollection:
+        elif flat_type == QgsWkbTypes.Type.GeometryCollection:
             for g in geom.asGeometryCollection():
                 pts.extend(self._extract_points(g))
         return pts
