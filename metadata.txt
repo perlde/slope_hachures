@@ -1,0 +1,16 @@
+[general]
+name=Slope Hachures (Böschungsschraffen)
+qgisMinimumVersion=3.22
+description=Engineering slope hachures and embankment ticks (RE 2012, OKSTRA 0486, DIN 2425)
+version=1.1.0
+author=perlde
+email=perlde@gmx.de
+about=Generates collision-free slope hachures, embankment ticks, and talud hatching from crest and toe lines. Features automated cartographic styling, breakline and excavation pit support (OKSTRA 0486), adaptive interval harmonization, and full Batch / Graphical Modeler support.
+tracker=https://github.com/perlde/slope_hachures/issues
+repository=https://github.com/perlde/slope_hachures
+tags=slope, hachures, hatching, embankment, slope ticks, talud, talus, böschung, böschungsschraffen, schraffen, falllinien, trassierung, vermessung, erdbau, tiefbau, baugrube, okstra, din 2425, civil engineering, surveying, cad
+category=Vector
+icon=icon.svg
+experimental=False
+deprecated=False
+has_processing_provider=True
