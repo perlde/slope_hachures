@@ -196,21 +196,21 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFeatureSource(
                 self.INPUT_OK,
                 self.tr('Crest line / Top of slope (Kamm)'),
-                [QgsProcessing.TypeVectorLine]
+                [QgsProcessing.SourceType.TypeVectorLine]
             )
         )
         self.addParameter(
             QgsProcessingParameterFeatureSource(
                 self.INPUT_UK,
                 self.tr('Toe line / Bottom of slope (Fuß)'),
-                [QgsProcessing.TypeVectorLine]
+                [QgsProcessing.SourceType.TypeVectorLine]
             )
         )
         self.addParameter(
             QgsProcessingParameterFeatureSource(
                 self.INPUT_KEHLEN,
                 self.tr('Valleys / Breaklines / Corners (optional)'),
-                [QgsProcessing.TypeVectorLine],
+                [QgsProcessing.SourceType.TypeVectorLine],
                 optional=True
             )
         )
@@ -226,7 +226,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.INTERVAL,
                 self.tr('Interval between long hatches [m]'),
-                type=QgsProcessingParameterNumber.Double,
+                type=QgsProcessingParameterNumber.Type.Double,
                 defaultValue=4.0,
                 minValue=0.1
             )
@@ -235,7 +235,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.SHORT_RATIO,
                 self.tr('Length of short hatches [%]'),
-                type=QgsProcessingParameterNumber.Double,
+                type=QgsProcessingParameterNumber.Type.Double,
                 defaultValue=50.0,
                 minValue=1.0,
                 maxValue=99.0
@@ -245,7 +245,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.MAX_SEARCH_DIST,
                 self.tr('Maximum search distance [m]'),
-                type=QgsProcessingParameterNumber.Double,
+                type=QgsProcessingParameterNumber.Type.Double,
                 defaultValue=50.0,
                 minValue=0.5
             )
@@ -254,7 +254,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFeatureSink(
                 self.OUTPUT,
                 self.tr('Slope plan (Hachures & Breaklines)'),
-                QgsProcessing.TypeVectorLine
+                QgsProcessing.SourceType.TypeVectorLine
             )
         )
 
@@ -306,7 +306,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             self.OUTPUT,
             context,
             fields,
-            QgsWkbTypes.LineString,
+            QgsWkbTypes.Type.LineString,
             ok_crs
         )
         if sink is None:
@@ -407,7 +407,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
                     item.full_length,
                     item.mode
                 ])
-                sink.addFeature(f, QgsFeatureSink.FastInsert)
+                sink.addFeature(f, QgsFeatureSink.Flag.FastInsert)
                 created_count += 1
 
             for kid, k_geom in local_kehlen_objs:
@@ -422,7 +422,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
                         round(k_geom.length(), 3),
                         'okstra_0486'
                     ])
-                    sink.addFeature(k_feat, QgsFeatureSink.FastInsert)
+                    sink.addFeature(k_feat, QgsFeatureSink.Flag.FastInsert)
                     written_kehlen_ids.add(kid)
                     created_count += 1
 
