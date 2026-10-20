@@ -1,34 +1,42 @@
 # -*- coding: utf-8 -*-
 """
-QGIS Processing Provider registration for Slope Hachures.
+Processing provider registration for Slope Hachures.
 
-Part of the Slope Hachures QGIS Plugin.
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 
-import os
+from qgis.core import QgsProcessingProvider
 from qgis.PyQt.QtGui import QIcon
-from qgis.core import QgsApplication, QgsProcessingProvider
+
+from ..common import is_german_locale, plugin_icon
+from ..constants import (
+    PROVIDER_ID,
+    PROVIDER_LONG_NAME_DE,
+    PROVIDER_LONG_NAME_EN,
+    PROVIDER_NAME_DE,
+    PROVIDER_NAME_EN,
+    PROVIDER_VERSION,
+)
 from .slope_algorithm import SlopeHachuresAlgorithm
 
 
 class SlopeProcessingProvider(QgsProcessingProvider):
-
-    def loadAlgorithms(self):
-        self.addAlgorithm(SlopeHachuresAlgorithm())
+    """Registers the slope hachures algorithm in the Processing toolbox."""
 
     def id(self) -> str:
-        return 'slope_hachures'
+        return PROVIDER_ID
 
     def name(self) -> str:
-        if QgsApplication.locale().startswith('de'):
-            return 'Böschungsschraffen'
-        return 'Slope Hachures'
+        return PROVIDER_NAME_DE if is_german_locale() else PROVIDER_NAME_EN
+
+    def longName(self) -> str:
+        return PROVIDER_LONG_NAME_DE if is_german_locale() else PROVIDER_LONG_NAME_EN
+
+    def version(self) -> str:
+        return PROVIDER_VERSION
 
     def icon(self) -> QIcon:
-        plugin_dir = os.path.dirname(os.path.dirname(__file__))
-        for filename in ('icon.svg', 'icon.png'):
-            path = os.path.join(plugin_dir, filename)
-            if os.path.exists(path):
-                return QIcon(path)
-        return super().icon()
+        return plugin_icon()
+
+    def loadAlgorithms(self) -> None:
+        self.addAlgorithm(SlopeHachuresAlgorithm())
