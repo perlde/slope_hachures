@@ -50,7 +50,7 @@ class BoeschungPlugin:
         translator = QTranslator()
         if not translator.load(qm_path):
             QgsMessageLog.logMessage(
-                f"Could not load translation file: {qm_path}", LOG_TAG, Qgis.Warning,
+                f"Could not load translation file: {qm_path}", LOG_TAG, Qgis.MessageLevel.Warning,
             )
             return
         if QCoreApplication.installTranslator(translator):
@@ -65,7 +65,7 @@ class BoeschungPlugin:
         if bar is not None:
             bar.pushWarning(self.tr("Slope Hachures"), message)
         else:
-            QgsMessageLog.logMessage(message, LOG_TAG, Qgis.Warning)
+            QgsMessageLog.logMessage(message, LOG_TAG, Qgis.MessageLevel.Warning)
 
     # --------------------------------------------------------------- provider
     def initProcessing(self) -> bool:
@@ -74,7 +74,7 @@ class BoeschungPlugin:
         provider = SlopeProcessingProvider()
         if not QgsApplication.processingRegistry().addProvider(provider):
             QgsMessageLog.logMessage(
-                f"Could not register provider '{PROVIDER_ID}'.", LOG_TAG, Qgis.Critical,
+                f"Could not register provider '{PROVIDER_ID}'.", LOG_TAG, Qgis.MessageLevel.Critical,
             )
             self._warn_user(self.tr(
                 "Processing provider could not be registered. "
@@ -135,6 +135,6 @@ class BoeschungPlugin:
             QgsMessageLog.logMessage(
                 f"Could not open algorithm dialog '{alg_id}': {exc}\n"
                 f"{traceback.format_exc()}",
-                LOG_TAG, Qgis.Critical,
+                LOG_TAG, Qgis.MessageLevel.Critical,
             )
             self._warn_user(self.tr("Could not open the processing dialog: {}").format(exc))
