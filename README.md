@@ -6,6 +6,16 @@
 
 A QGIS Processing plugin that creates slope hachures (embankment ticks, Taludschraffur) from crest and toe lines according to **RE 2012**, **OKSTRA 0486** and **DIN 2425 / 18702**.
 
+![Slope hachures](media/slope.png)
+
+## Examples
+
+| | |
+|:--:|:--:|
+| <img src="media/stresstest.png" width="320"><br>Stress test overview | <img src="media/stresstest_1.png" width="320"><br>Stress test 1 |
+| <img src="media/stresstest_2.png" width="320"><br>Stress test 2 | <img src="media/stresstest_3.png" width="320"><br>Stress test 3 |
+| <img src="media/stresstest_4.png" width="320"><br>Stress test 4 | <img src="media/stresstest_5.png" width="320"><br>Stress test 5 |
+
 ## Features
 
 - Standard cartographic look: long and short hachures in earth brown, styled automatically.
