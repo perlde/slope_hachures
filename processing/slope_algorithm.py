@@ -395,7 +395,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
                 "Layer '{}' ({}) uses a geographic CRS ({}). Slope hachures require "
                 "a projected, metric CRS (e.g. UTM / Gauß-Krüger)."
             ).format(name, role, crs.authid()))
-        if crs.mapUnits() != QgsUnitTypes.DistanceMeters:
+        if crs.mapUnits() != QgsUnitTypes.DistanceUnit.DistanceMeters:
             raise QgsProcessingException(self.tr(
                 "Layer '{}' ({}) uses CRS units other than meters ({}). "
                 "Please reproject to a metric CRS."
