@@ -9,10 +9,13 @@ import os
 import traceback
 from typing import Optional
 
-import processing
 from qgis.core import Qgis, QgsApplication, QgsMessageLog
 from qgis.PyQt.QtCore import QCoreApplication, QLocale, QTranslator
-from qgis.PyQt.QtWidgets import QAction
+
+try:
+    from qgis.PyQt.QtGui import QAction  # Qt6 (QGIS 4), and QGIS 3 versions with the Qt6 shim
+except ImportError:
+    from qgis.PyQt.QtWidgets import QAction  # Qt5 (older QGIS 3)
 
 from .common import plugin_icon
 from .constants import ALGORITHM_ID, LOG_TAG, PROVIDER_ID, TRANSLATION_BASENAME
@@ -39,8 +42,8 @@ class BoeschungPlugin:
         self.provider: Optional[SlopeProcessingProvider] = None
         self.action: Optional[QAction] = None
         self._translator: Optional[QTranslator] = None
+        self._install_translator()  # before the first tr() call, otherwise it stays English
         self.menu_name = self.tr("&Slope Hachures")
-        self._install_translator()
 
     # ------------------------------------------------------------------ i18n
     def _install_translator(self) -> None:
@@ -127,6 +130,11 @@ class BoeschungPlugin:
     def run(self) -> None:
         if self.provider is None:
             self._warn_user(self.tr("Plugin is not initialized. Please restart QGIS."))
+            return
+        try:
+            import processing  # the Processing core plugin; imported when needed
+        except ImportError:
+            self._warn_user(self.tr("The QGIS Processing plugin is not available."))
             return
         alg_id = f"{PROVIDER_ID}:{ALGORITHM_ID}"
         try:

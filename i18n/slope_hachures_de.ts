@@ -35,6 +35,10 @@
         <source>Could not open the processing dialog: {}</source>
         <translation>Der Processing-Dialog konnte nicht geöffnet werden: {}</translation>
     </message>
+    <message>
+        <source>The QGIS Processing plugin is not available.</source>
+        <translation>Das QGIS-Processing-Plugin ist nicht verfügbar.</translation>
+    </message>
 </context>
 <context>
     <name>SlopeHachuresAlgorithm</name>
@@ -139,8 +143,12 @@
         <translation>Überspringe ungültiges Feature mit ID {} im Layer '{}'.</translation>
     </message>
     <message>
-        <source>Interval too small for crest feature ID {}: more than {} stations would be created.</source>
-        <translation>Intervall zu klein für Oberkanten-Feature mit ID {}: Es würden mehr als {} Stationen erzeugt.</translation>
+        <source>Interval too small for crest feature ID {}: more than {} stations would be created. The crest section was skipped.</source>
+        <translation>Intervall zu klein für Oberkanten-Feature mit ID {}: Es würden mehr als {} Stationen erzeugt. Der Kammabschnitt wurde übersprungen.</translation>
+    </message>
+    <message>
+        <source>No valid coordinate transformation from layer '{}' ({}) to the crest CRS.</source>
+        <translation>Keine gültige Koordinatentransformation von Layer '{}' ({}) in das KBS der Oberkante.</translation>
     </message>
     <message>
         <source>No toe line within search distance for crest feature ID {}.</source>

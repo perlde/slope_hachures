@@ -47,6 +47,7 @@ class Target:
     uk_param: Optional[float]      # distance along the toe line, None for breaklines
     point: QgsPointXY              # end point of the hachure on the toe side
     mode: HachureMode
+    draw_long: bool = True         # False for the closing target of a crest ring (same hachure as its start)
 
 
 @dataclass(frozen=True)

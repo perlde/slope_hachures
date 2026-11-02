@@ -2,22 +2,30 @@
 """
 Planar geometry helpers for the slope engine. No UI and no processing imports.
 
+Queries that run for every crest station work on core.polyline.Polyline objects.
+QgsGeometry is used for the breaklines and for operations that run a few times
+per crest part.
+
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 
 import math
 from typing import List, Optional, Sequence, Tuple
 
-from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsSpatialIndex, QgsWkbTypes
+from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsRectangle, QgsSpatialIndex, QgsWkbTypes
 
 from .models import HachureMode, Hit
+from .polyline import Polyline, orientation_vote, signed_area
 from .tuning import (
     MAX_SLOPE_DOT,
     MIN_TARGET_DIST,
     NORMAL_DELTA_FACTOR,
     NORMAL_DELTA_MAX,
     NORMAL_DELTA_MIN,
+    ORIENTATION_SAMPLES,
+    RING_CLOSE_TOLERANCE,
     SLOPE_ANGLE_DELTA,
+    SPATIAL_INDEX_MIN_SEGMENTS,
 )
 
 Vector = Tuple[float, float]
@@ -45,27 +53,41 @@ def ray(origin: QgsPointXY, direction: Vector, length: float) -> QgsGeometry:
     )
 
 
-def unit_tangent(geom: QgsGeometry, station: float, delta: float) -> Optional[Vector]:
+# ------------------------------------------------------------------ polylines
+def to_polyline(geom: QgsGeometry, indexed: bool = False) -> Polyline:
+    """Builds a Polyline from a single LineString geometry.
+
+    With indexed=True a QgsSpatialIndex of the segments is attached, so ray and
+    nearest-point queries only test the segments near the query.
+    """
+    line = Polyline([(p.x(), p.y()) for p in geom.asPolyline()])
+    if indexed and line.segment_count >= SPATIAL_INDEX_MIN_SEGMENTS:
+        line.attach_lookup(_segment_lookup(line))
+    return line
+
+
+def _segment_lookup(line: Polyline):
+    """Returns a lookup backed by a QgsSpatialIndex, or None if the index cannot be built."""
+    index = QgsSpatialIndex()
+    for number, (xmin, ymin, xmax, ymax) in enumerate(line.segment_boxes()):
+        if not index.addFeature(number, QgsRectangle(xmin, ymin, xmax, ymax)):
+            return None  # fall back to scanning all segments
+
+    def lookup(box: Tuple[float, float, float, float]) -> List[int]:
+        return index.intersects(QgsRectangle(*box))
+
+    return lookup
+
+
+def unit_tangent(line: Polyline, station: float, delta: float) -> Optional[Vector]:
     """Unit direction of a line around a station, estimated over +/- delta."""
-    total = geom.length()
-    s1 = max(0.0, station - delta)
-    s2 = min(total, station + delta)
-    if s2 <= s1:
-        return None
-    p1 = geom.interpolate(s1).asPoint()
-    p2 = geom.interpolate(s2).asPoint()
-    dx = p2.x() - p1.x()
-    dy = p2.y() - p1.y()
-    length = math.hypot(dx, dy)
-    if length <= 0.0:
-        return None
-    return dx / length, dy / length
+    return line.tangent(station, delta)
 
 
-def unit_normal(geom: QgsGeometry, station: float, interval: float) -> Optional[Vector]:
+def unit_normal(line: Polyline, station: float, interval: float) -> Optional[Vector]:
     """Unit normal (left of the tangent) at a station."""
     delta = clamp(interval * NORMAL_DELTA_FACTOR, NORMAL_DELTA_MIN, NORMAL_DELTA_MAX)
-    tangent = unit_tangent(geom, station, delta)
+    tangent = line.tangent(station, delta)
     if tangent is None:
         return None
     tx, ty = tangent
@@ -73,13 +95,13 @@ def unit_normal(geom: QgsGeometry, station: float, interval: float) -> Optional[
 
 
 def is_valid_slope_angle(
-    ok_geom: QgsGeometry,
+    crest: Polyline,
     station: float,
     p_start: QgsPointXY,
     p_target: QgsPointXY,
 ) -> bool:
     """Rejects targets that would lie almost along the crest line."""
-    tangent = unit_tangent(ok_geom, station, SLOPE_ANGLE_DELTA)
+    tangent = crest.tangent(station, SLOPE_ANGLE_DELTA)
     if tangent is None:
         return True
     vx = p_target.x() - p_start.x()
@@ -167,33 +189,34 @@ def has_self_intersection(geom: Optional[QgsGeometry]) -> bool:
 
 def find_best_collision(
     origin: QgsPointXY,
-    ray_geom: QgsGeometry,
-    uk_geom: QgsGeometry,
-    kehlen: Sequence[QgsGeometry],
+    direction: Vector,
     max_dist: float,
+    toe: Polyline,
+    kehlen: Sequence[QgsGeometry],
 ) -> Optional[Hit]:
-    """Closest valid hit of a ray on the toe line or on a breakline."""
+    """Closest valid hit of a ray on the toe line or on a breakline.
+
+    A breakline hit wins only if it is strictly closer than the toe hit.
+    """
     best: Optional[Hit] = None
     best_dist = max_dist
 
-    inter_uk = ray_geom.intersection(uk_geom)
-    if not inter_uk.isEmpty():
-        for p in extract_points(inter_uk):
-            d = measure(origin, p)
-            if MIN_TARGET_DIST < d < best_dist:
-                best_dist = d
-                uk_param = uk_geom.lineLocatePoint(QgsGeometry.fromPointXY(p))
-                best = Hit(p, uk_param, HachureMode.PROJEKTION)
+    toe_hit = toe.first_hit((origin.x(), origin.y()), direction, max_dist, MIN_TARGET_DIST)
+    if toe_hit is not None:
+        best_dist = toe_hit.distance
+        best = Hit(QgsPointXY(*toe_hit.point), toe_hit.param, HachureMode.PROJEKTION)
 
-    for kehle in kehlen:
-        inter_k = ray_geom.intersection(kehle)
-        if inter_k.isEmpty():
-            continue
-        for p in extract_points(inter_k):
-            d = measure(origin, p)
-            if MIN_TARGET_DIST < d < best_dist:
-                best_dist = d
-                best = Hit(p, None, HachureMode.KEHLE)
+    if kehlen:
+        ray_geom = ray(origin, direction, max_dist)
+        for kehle in kehlen:
+            inter_k = ray_geom.intersection(kehle)
+            if inter_k.isEmpty():
+                continue
+            for p in extract_points(inter_k):
+                d = measure(origin, p)
+                if MIN_TARGET_DIST < d < best_dist:
+                    best_dist = d
+                    best = Hit(p, None, HachureMode.KEHLE)
 
     return best
 
@@ -202,18 +225,14 @@ def cast_both_ways(
     origin: QgsPointXY,
     normal: Vector,
     max_dist: float,
-    uk_geom: QgsGeometry,
+    toe: Polyline,
     kehlen: Sequence[QgsGeometry],
 ) -> Optional[Hit]:
     """Casts along the normal, then against it if nothing was hit."""
-    hit = find_best_collision(
-        origin, ray(origin, normal, max_dist), uk_geom, kehlen, max_dist
-    )
+    hit = find_best_collision(origin, normal, max_dist, toe, kehlen)
     if hit is None:
         back = (-normal[0], -normal[1])
-        hit = find_best_collision(
-            origin, ray(origin, back, max_dist), uk_geom, kehlen, max_dist
-        )
+        hit = find_best_collision(origin, back, max_dist, toe, kehlen)
     return hit
 
 
@@ -263,19 +282,105 @@ def as_single_polyline(geom: Optional[QgsGeometry]) -> Optional[QgsGeometry]:
     return QgsGeometry.fromPolylineXY(points)
 
 
+def line_ends(geom: QgsGeometry) -> Tuple[QgsPointXY, QgsPointXY]:
+    """First and last vertex of a (multi)line, read directly from the vertices.
+
+    interpolate(length()) can return a null geometry when rounding puts the
+    distance just past the end, notably for multipart lines in QGIS 3.22.
+    """
+    if geom.isMultipart():
+        parts = [part for part in geom.asMultiPolyline() if part]
+        return QgsPointXY(parts[0][0]), QgsPointXY(parts[-1][-1])
+    points = geom.asPolyline()
+    return QgsPointXY(points[0]), QgsPointXY(points[-1])
+
+
+def toe_side(crest: Polyline, toe_geom: QgsGeometry) -> float:
+    """+1 if the toe lies left of the crest (in its direction), -1 if right.
+
+    Decided by a majority of crest samples, each compared with its nearest toe point.
+    """
+    count = ORIENTATION_SAMPLES
+    vote = 0
+    for k in range(count):
+        station = crest.length * (k + 0.5) / count
+        tangent = crest.tangent(station, NORMAL_DELTA_MAX)
+        if tangent is None:
+            continue
+        px, py = crest.point_at(station)
+        near = toe_geom.nearestPoint(QgsGeometry.fromPointXY(QgsPointXY(px, py)))
+        if near.isEmpty():
+            continue
+        q = near.asPoint()
+        cross = tangent[0] * (q.y() - py) - tangent[1] * (q.x() - px)
+        vote += (cross > 0.0) - (cross < 0.0)
+    return -1.0 if vote < 0 else 1.0
+
+
+def _is_ring(points: Sequence[QgsPointXY]) -> bool:
+    return len(points) >= 4 and measure(points[0], points[-1]) <= RING_CLOSE_TOLERANCE
+
+
+def _toe_runs_against_crest(
+    crest_points: Sequence[QgsPointXY],
+    toe_geom: QgsGeometry,
+    crest_is_ring: bool,
+    toe_is_ring: bool,
+) -> bool:
+    """Decides the toe direction by projecting crest samples onto the toe line.
+
+    Used when exactly one of the two lines is a ring: the start/end comparison
+    then gives no answer, because the ring's start and end coincide.
+    """
+    crest = Polyline([(p.x(), p.y()) for p in crest_points])
+    toe_len = toe_geom.length()
+    if crest.length <= 0.0 or toe_len <= 0.0:
+        return False
+    count = ORIENTATION_SAMPLES
+    divisor = count if crest_is_ring else count - 1
+    # Polyline.point_at clamps to the line; QgsGeometry.interpolate() returns a null
+    # geometry in QGIS 3.22 if the distance exceeds the length by rounding.
+    params = [
+        toe_geom.lineLocatePoint(QgsGeometry.fromPointXY(
+            QgsPointXY(*crest.point_at(crest.length * k / divisor))))
+        for k in range(count)
+    ]
+    period = None
+    if toe_is_ring:
+        points = toe_geom.asPolyline()
+        period = toe_len + measure(points[0], points[-1])
+    return orientation_vote(params, period, cyclic=crest_is_ring) < 0
+
+
 def align_toe_line(ok_geom: QgsGeometry, uk_geom: QgsGeometry) -> Optional[QgsGeometry]:
     """Returns the toe line as one LineString, oriented like the crest line.
 
-    Returns None if the toe line is not one continuous line.
+    Returns None if the toe line is not one continuous line. Two open lines are
+    compared by their end points; if crest or toe is a ring, the direction is
+    taken from the ring winding (two rings) or from projected crest samples.
     """
     toe = as_single_polyline(uk_geom)
     if toe is None:
         return None
     points = toe.asPolyline()
-    ok_start = ok_geom.interpolate(0.0).asPoint()
-    ok_end = ok_geom.interpolate(ok_geom.length()).asPoint()
-    direct = measure(ok_start, points[0]) + measure(ok_end, points[-1])
-    reverse = measure(ok_start, points[-1]) + measure(ok_end, points[0])
-    if reverse < direct:
+    crest = as_single_polyline(ok_geom)
+    crest_points = crest.asPolyline() if crest is not None else []
+    crest_is_ring = _is_ring(crest_points)
+    toe_is_ring = _is_ring(points)
+
+    if crest_is_ring and toe_is_ring:
+        crest_area = signed_area([(p.x(), p.y()) for p in crest_points])
+        toe_area = signed_area([(p.x(), p.y()) for p in points])
+        reverse = crest_area * toe_area < 0.0
+    elif crest_is_ring or toe_is_ring:
+        reverse = _toe_runs_against_crest(crest_points, toe, crest_is_ring, toe_is_ring)
+    else:
+        ok_start = ok_geom.interpolate(0.0).asPoint()
+        ok_end = ok_geom.interpolate(ok_geom.length()).asPoint()
+        direct = measure(ok_start, points[0]) + measure(ok_end, points[-1])
+        reverse_sum = measure(ok_start, points[-1]) + measure(ok_end, points[0])
+        reverse = reverse_sum < direct
+
+    if reverse:
         points = list(reversed(points))
     return QgsGeometry.fromPolylineXY(points)

@@ -8,26 +8,35 @@ the emitter. It has no UI and no processing dependencies.
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 
-from typing import List, Optional, Sequence
+import math
+from typing import Callable, List, Optional, Sequence
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsProcessingFeedback
 
 from .emission import HachureEmitter
 from .geometry_utils import (
     align_toe_line,
+    as_single_polyline,
+    cast_both_ways,
+    clamp,
     extract_points,
     has_self_intersection,
-    project_onto,
     is_near_any,
     is_valid_slope_angle,
+    line_ends,
     measure,
     nearest_crossing,
+    project_onto,
     segment,
-    cast_both_ways,
+    to_polyline,
+    toe_side,
     unit_normal,
 )
 from .models import HachureData, HachureMode, Hit, Target
+from .polyline import Polyline, circular_delta
 from .tuning import (
+    CANCEL_CHECK_INTERVAL,
+    ENDPOINT_PREFERENCE,
     KEHLE_ANCHOR_DIST,
     KEHLE_NEAR_FACTOR,
     KEHLE_SNAP_DIST,
@@ -38,10 +47,18 @@ from .tuning import (
     MIN_SECTION_LENGTH,
     MIN_SHORT_RATIO,
     MIN_STATION,
-    ENDPOINT_PREFERENCE,
     MIN_TARGET_DIST,
+    NORMAL_DELTA_FACTOR,
+    NORMAL_DELTA_MAX,
+    NORMAL_DELTA_MIN,
+    RING_CLOSE_TOLERANCE,
     STATION_DEDUP_DIST,
 )
+
+ProgressCallback = Callable[[float], None]
+
+# Share of the progress of one crest part spent on the target search; the rest is emission.
+_TARGET_PHASE = 0.5
 
 
 class SlopeEngine:
@@ -73,38 +90,75 @@ class SlopeEngine:
         uk_geom: QgsGeometry,
         kehlen_geoms: Optional[Sequence[QgsGeometry]] = None,
         feedback: Optional[QgsProcessingFeedback] = None,
+        validate: bool = True,
+        progress: Optional[ProgressCallback] = None,
     ) -> List[HachureData]:
+        """Computes the hachures of one crest line against one toe line.
+
+        validate=False skips the validity and self-crossing checks. The Processing
+        algorithm checks every input feature once, before it calls the engine.
+        progress, if given, receives the completed fraction (0..1) of this call.
+        """
         log = feedback if feedback is not None else QgsProcessingFeedback()
 
-        error = self._validate_input(ok_geom, uk_geom)
+        if validate:
+            error = self._validate_input(ok_geom, uk_geom)
+        else:
+            error = self._check_present(ok_geom, uk_geom)
         if error is not None:
             log.pushWarning(f"SlopeEngine: {error}, skipped.")
             return []
 
         kehlen = [k for k in (kehlen_geoms or []) if k is not None and not k.isEmpty()]
-        ok_len = ok_geom.length()
+        crest_geom = as_single_polyline(ok_geom)
+        if crest_geom is None:
+            log.pushWarning("SlopeEngine: crest line is not one continuous line, skipped.")
+            return []
+        ok_len = crest_geom.length()
         if ok_len <= 0.0:
             log.pushWarning("SlopeEngine: degenerate crest geometry, skipped.")
             return []
 
-        toe = align_toe_line(ok_geom, uk_geom)
-        if toe is None or toe.length() <= 0.0:
+        toe_geom = align_toe_line(crest_geom, uk_geom)
+        if toe_geom is None or toe_geom.length() <= 0.0:
             log.pushWarning("SlopeEngine: toe line is not one continuous line, skipped.")
             return []
 
-        primary = self._primary_targets(ok_geom, toe, kehlen, ok_len)
+        crest = to_polyline(crest_geom)
+        toe = to_polyline(toe_geom, indexed=True)
+        ring_period = toe.ring_period(RING_CLOSE_TOLERANCE)
+        crest_is_ring = crest.ring_period(RING_CLOSE_TOLERANCE) is not None
+        # Open lines keep the 1.1.2 behaviour (left normal first). With a ring the
+        # first ray must point to the toe, otherwise it can cross a small mound or
+        # pit and hit the far side of the toe ring.
+        side = toe_side(crest, toe_geom) if (crest_is_ring or ring_period is not None) else 1.0
+
+        primary = self._primary_targets(
+            crest_geom, crest, toe_geom, toe, kehlen, ok_len,
+            crest_is_ring, ring_period is not None, side, log, progress,
+        )
+        if log.isCanceled():
+            return []
         if len(primary) < 2:
             log.pushInfo(f"SlopeEngine: only {len(primary)} target(s), skipped.")
             return []
 
-        targets = enforce_monotonicity(primary)
+        targets = enforce_monotonicity(primary, ring_period)
         emitter = HachureEmitter(
-            ok_geom, toe, kehlen,
-            self.interval, self.short_ratio, self.max_search_dist,
+            crest, toe, kehlen,
+            self.interval, self.short_ratio, self.max_search_dist, side,
         )
-        return emitter.emit(targets, log)
+        emit_progress = _scaled(progress, _TARGET_PHASE, 1.0) if progress is not None else None
+        return emitter.emit(targets, log, emit_progress)
 
     # ------------------------------------------------------------ validation
+    @staticmethod
+    def _check_present(ok_geom: Optional[QgsGeometry], uk_geom: Optional[QgsGeometry]) -> Optional[str]:
+        for name, geom in (("crest", ok_geom), ("toe", uk_geom)):
+            if geom is None or geom.isEmpty():
+                return f"{name} geometry is null or empty"
+        return None
+
     @staticmethod
     def _validate_input(ok_geom: Optional[QgsGeometry], uk_geom: Optional[QgsGeometry]) -> Optional[str]:
         for name, geom in (("crest", ok_geom), ("toe", uk_geom)):
@@ -120,13 +174,22 @@ class SlopeEngine:
     def _primary_targets(
         self,
         ok: QgsGeometry,
+        crest: Polyline,
         uk: QgsGeometry,
+        toe: Polyline,
         kehlen: List[QgsGeometry],
         ok_len: float,
+        crest_is_ring: bool,
+        toe_is_ring: bool,
+        side: float,
+        log: QgsProcessingFeedback,
+        progress: Optional[ProgressCallback],
     ) -> List[Target]:
         targets: List[Target] = []
         bounds = [0.0] + find_kehlen_stations(ok, kehlen, ok_len) + [ok_len]
         last_section = len(bounds) - 2
+        counter = 0
+        ring_start: Optional[Target] = None
 
         for idx in range(len(bounds) - 1):
             s_start, s_end = bounds[idx], bounds[idx + 1]
@@ -135,62 +198,117 @@ class SlopeEngine:
                 continue
 
             if idx == 0:
-                start = self._boundary_target(ok, uk, kehlen, True, ok_len)
+                start = None
+                if crest_is_ring:
+                    start = self._ring_start_target(crest, toe, kehlen, ok_len, side)
+                if start is None:
+                    start = self._boundary_target(crest, uk, toe, kehlen, True, ok_len, toe_is_ring)
                 if start is not None:
                     targets.append(start)
+                    if crest_is_ring:
+                        ring_start = start
 
             segments = max(1, round(sec_len / self.interval))
             step_len = sec_len / segments
             for step in range(1, segments):
+                counter += 1
+                if counter % CANCEL_CHECK_INTERVAL == 0:
+                    if log.isCanceled():
+                        return targets
+                    if progress is not None:
+                        progress(_TARGET_PHASE * (s_start + step * step_len) / ok_len)
                 station = s_start + step * step_len
-                p_ok = ok.interpolate(station).asPoint()
+                p_ok = QgsPointXY(*crest.point_at(station))
                 if is_near_any(p_ok, kehlen, KEHLE_NEAR_FACTOR * self.interval):
                     continue
-                internal = self._internal_target(ok, uk, kehlen, station, p_ok)
+                internal = self._internal_target(crest, toe, kehlen, station, p_ok, side)
                 if internal is not None:
                     targets.append(internal)
 
             if idx == last_section:
-                end = self._boundary_target(ok, uk, kehlen, False, ok_len)
+                if ring_start is not None:
+                    # The crest ring closes on its start: same hachure, drawn once.
+                    end = Target(ok_len, ring_start.uk_param, ring_start.point, ring_start.mode,
+                                 draw_long=False)
+                else:
+                    end = self._boundary_target(crest, uk, toe, kehlen, False, ok_len, toe_is_ring)
                 if end is not None:
                     targets.append(end)
             else:
-                p_section_end = ok.interpolate(s_end).asPoint()
+                p_section_end = QgsPointXY(*crest.point_at(s_end))
                 anchor = find_kehle_toe_point(p_section_end, kehlen, uk)
                 targets.append(Target(s_end, None, anchor, HachureMode.KEHLE_ANKER))
 
+        if progress is not None:
+            progress(_TARGET_PHASE)
         return targets
+
+    def _ring_start_target(
+        self,
+        crest: Polyline,
+        toe: Polyline,
+        kehlen: List[QgsGeometry],
+        ok_len: float,
+        side: float,
+    ) -> Optional[Target]:
+        """Target at the start of a crest ring.
+
+        A ring has no flanks: its start is an ordinary station, so it is cast along
+        the normal like its neighbours. The direction is taken across the ring
+        closure. Returns None if the start lies near a breakline or nothing is hit;
+        the caller then uses the boundary logic.
+        """
+        p_ok = QgsPointXY(*crest.point_at(0.0))
+        if is_near_any(p_ok, kehlen, KEHLE_NEAR_FACTOR * self.interval):
+            return None
+        delta = min(ok_len / 4.0, clamp(self.interval * NORMAL_DELTA_FACTOR,
+                                        NORMAL_DELTA_MIN, NORMAL_DELTA_MAX))
+        before = crest.point_at(ok_len - delta)
+        after = crest.point_at(delta)
+        tx = after[0] - before[0]
+        ty = after[1] - before[1]
+        norm = math.hypot(tx, ty)
+        hit: Optional[Hit] = None
+        if norm > 0.0:
+            normal = (-ty / norm * side, tx / norm * side)
+            hit = cast_both_ways(p_ok, normal, self.max_search_dist, toe, kehlen)
+        if hit is None:
+            hit = self._fallback_nearest(crest, toe, kehlen, 0.0, p_ok)
+        if hit is None:
+            return None
+        return Target(0.0, hit.uk_param, hit.point, hit.mode)
 
     def _boundary_target(
         self,
-        ok: QgsGeometry,
+        crest: Polyline,
         uk: QgsGeometry,
+        toe: Polyline,
         kehlen: List[QgsGeometry],
         at_start: bool,
         ok_len: float,
+        toe_is_ring: bool,
     ) -> Optional[Target]:
         """Target at the crest start or end.
 
         The toe-side point is the projection of the crest end onto the toe line,
         not the end of the toe line. Otherwise a toe line that reaches beyond the
-        crest pulls the hachure away from the crest.
+        crest pulls the hachure away from the crest. A ring has no ends, so the
+        projection is always used there.
         """
         station = 0.0 if at_start else ok_len
-        p_ok = ok.interpolate(station).asPoint()
+        p_ok = QgsPointXY(*crest.point_at(station))
         p_uk, uk_param = project_onto(uk, p_ok)
-        uk_start = uk.interpolate(0.0).asPoint()
-        uk_end = uk.interpolate(uk.length()).asPoint()
-        if measure(uk_start, uk_end) < 1e-6 and measure(p_uk, uk_start) < 1e-6:
-            # Closed toe ring: start and end coincide, pin the parameter to the requested side.
-            uk_param = 0.0 if at_start else uk.length()
 
-        # Prefer the toe END if it is not much farther away than the perpendicular foot.
-        # Otherwise the toe beyond the last hachure stays unhatched.
-        end_point, end_param = (uk_start, 0.0) if at_start else (uk_end, uk.length())
-        d_proj = measure(p_ok, p_uk)
-        d_end = measure(p_ok, end_point)
-        if d_end <= self.max_search_dist and d_end <= ENDPOINT_PREFERENCE * d_proj:
-            p_uk, uk_param = end_point, end_param
+        if not toe_is_ring:
+            # Prefer the toe END if it is not much farther away than the perpendicular foot.
+            # Otherwise the toe beyond the last hachure stays unhatched.
+            uk_start = QgsPointXY(*toe.points[0])
+            uk_end = QgsPointXY(*toe.points[-1])
+            end_point, end_param = (uk_start, 0.0) if at_start else (uk_end, uk.length())
+            d_proj = measure(p_ok, p_uk)
+            d_end = measure(p_ok, end_point)
+            if d_end <= self.max_search_dist and d_end <= ENDPOINT_PREFERENCE * d_proj:
+                p_uk, uk_param = end_point, end_param
 
         if is_near_any(p_ok, kehlen, KEHLE_ANCHOR_DIST):
             return Target(station, None, p_uk, HachureMode.KEHLE_ANKER)
@@ -210,49 +328,58 @@ class SlopeEngine:
 
     def _internal_target(
         self,
-        ok: QgsGeometry,
-        uk: QgsGeometry,
+        crest: Polyline,
+        toe: Polyline,
         kehlen: List[QgsGeometry],
         station: float,
         p_ok: QgsPointXY,
+        side: float = 1.0,
     ) -> Optional[Target]:
         hit: Optional[Hit] = None
-        normal = unit_normal(ok, station, self.interval)
+        normal = unit_normal(crest, station, self.interval)
         if normal is not None:
-            hit = cast_both_ways(p_ok, normal, self.max_search_dist, uk, kehlen)
+            normal = (normal[0] * side, normal[1] * side)
+            hit = cast_both_ways(p_ok, normal, self.max_search_dist, toe, kehlen)
         if hit is None:
-            hit = self._fallback_nearest(ok, uk, kehlen, station, p_ok)
+            hit = self._fallback_nearest(crest, toe, kehlen, station, p_ok)
         if hit is None:
             return None
         return Target(station, hit.uk_param, hit.point, hit.mode)
 
     def _fallback_nearest(
         self,
-        ok: QgsGeometry,
-        uk: QgsGeometry,
+        crest: Polyline,
+        toe: Polyline,
         kehlen: List[QgsGeometry],
         station: float,
         p_ok: QgsPointXY,
     ) -> Optional[Hit]:
-        near = uk.nearestPoint(QgsGeometry.fromPointXY(p_ok))
-        if near.isEmpty() or measure(p_ok, near.asPoint()) > self.max_search_dist:
+        near = toe.nearest((p_ok.x(), p_ok.y()), self.max_search_dist)
+        if near is None:
             return None
 
-        cand_t = uk.lineLocatePoint(near)
-        cand_pt = uk.interpolate(cand_t).asPoint()
-        if not is_valid_slope_angle(ok, station, p_ok, cand_pt):
+        cand_t = near.param
+        cand_pt = QgsPointXY(*near.point)
+        if not is_valid_slope_angle(crest, station, p_ok, cand_pt):
             return None
 
-        cand_dist = measure(p_ok, cand_pt)
-        crossing = nearest_crossing(
-            p_ok, segment(p_ok, cand_pt), kehlen, limit=cand_dist, margin=0.0,
-        )
-        if crossing is not None:
-            return Hit(crossing, None, HachureMode.KEHLE)
+        if kehlen:
+            crossing = nearest_crossing(
+                p_ok, segment(p_ok, cand_pt), kehlen, limit=measure(p_ok, cand_pt), margin=0.0,
+            )
+            if crossing is not None:
+                return Hit(crossing, None, HachureMode.KEHLE)
         return Hit(cand_pt, cand_t, HachureMode.PROJEKTION)
 
 
 # ------------------------------------------------------------------ helpers
+def _scaled(progress: ProgressCallback, start: float, end: float) -> ProgressCallback:
+    """Maps a 0..1 progress into the range start..end of another callback."""
+    def report(fraction: float) -> None:
+        progress(start + (end - start) * fraction)
+    return report
+
+
 def find_kehlen_stations(
     ok: QgsGeometry,
     kehlen: Sequence[QgsGeometry],
@@ -270,8 +397,7 @@ def find_kehlen_stations(
                 if MIN_STATION < s < (ok_len - MIN_STATION):
                     stations.append(s)
 
-        for kp in (kehle.interpolate(0.0).asPoint(),
-                   kehle.interpolate(kehle.length()).asPoint()):
+        for kp in line_ends(kehle):
             kp_geom = QgsGeometry.fromPointXY(kp)
             if ok.distance(kp_geom) < KEHLE_SNAP_DIST:
                 near = ok.nearestPoint(kp_geom)
@@ -304,8 +430,7 @@ def find_kehle_toe_point(
             best = kehle
 
     if best is not None and best_dist < KEHLE_TOE_MAX_DIST:
-        k_start = best.interpolate(0.0).asPoint()
-        k_end = best.interpolate(best.length()).asPoint()
+        k_start, k_end = line_ends(best)
         if measure(crest_point, k_start) > measure(crest_point, k_end):
             return k_start
         return k_end
@@ -318,8 +443,16 @@ def find_kehle_toe_point(
     return crest_point
 
 
-def enforce_monotonicity(targets: List[Target]) -> List[Target]:
-    """Drops targets that would move backwards along the toe line and cause crossings."""
+def enforce_monotonicity(
+    targets: List[Target],
+    ring_period: Optional[float] = None,
+) -> List[Target]:
+    """Drops targets that would move backwards along the toe line and cause crossings.
+
+    On a toe ring (ring_period set) the parameter restarts at the ring's start
+    vertex. Steps are then measured the short way round the ring, so passing the
+    start vertex is not mistaken for a step backwards.
+    """
     if len(targets) <= 2:
         return targets
 
@@ -331,7 +464,11 @@ def enforce_monotonicity(targets: List[Target]) -> List[Target]:
             cleaned.append(current)
             continue
         if current.uk_param is not None and previous.uk_param is not None:
-            if current.uk_param < previous.uk_param - MIN_TARGET_DIST:
+            if ring_period:
+                step = circular_delta(previous.uk_param, current.uk_param, ring_period)
+            else:
+                step = current.uk_param - previous.uk_param
+            if step < -MIN_TARGET_DIST:
                 if current.mode == HachureMode.ENDFLANKE:
                     cleaned.append(current)
                 continue

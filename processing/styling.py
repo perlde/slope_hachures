@@ -2,13 +2,10 @@
 """
 Standard cartographic symbology for slope hachures.
 
-The post-processor is a module-level singleton. Its Python object therefore
-stays alive for as long as the module is loaded, while QGIS uses it.
-
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 
-from typing import Optional
+from typing import Set
 
 from qgis.core import (
     QgsLineSymbol,
@@ -17,6 +14,7 @@ from qgis.core import (
     QgsRuleBasedRenderer,
     QgsVectorLayer,
 )
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QCoreApplication
 
 _TR_CONTEXT = "SlopeHachuresAlgorithm"
@@ -46,21 +44,35 @@ class SlopeStylePostProcessor(QgsProcessingLayerPostProcessorInterface):
     """Applies the standard symbology when a processing output layer is loaded.
 
     QGIS takes ownership of the instance passed to setPostProcessor() and deletes it
-    after the run. Therefore a new instance is created for every run. Reusing one
-    instance fails on the second run with "wrapped C/C++ object has been deleted".
+    after the run, so a new instance is created for every run. Reusing one instance
+    fails on the second run with "wrapped C/C++ object has been deleted".
+
+    The Python side must keep each instance alive until QGIS has called it,
+    otherwise the Python object can be garbage-collected while QGIS still holds
+    the C++ pointer. Several runs can be pending at the same time (batch mode,
+    models with several outputs), so every pending instance is kept, not only
+    the most recent one. An instance is released once it has run; instances whose
+    C++ object QGIS has already deleted are dropped on the next create().
     """
 
-    instance: Optional["SlopeStylePostProcessor"] = None  # reference to the current run's instance
+    _pending: Set["SlopeStylePostProcessor"] = set()
 
     def postProcessLayer(self, layer: QgsMapLayer, context, feedback) -> None:
-        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
-            return
-        apply_slope_style(layer)
-        layer.triggerRepaint()
+        try:
+            if isinstance(layer, QgsVectorLayer) and layer.isValid():
+                apply_slope_style(layer)
+                layer.triggerRepaint()
+        finally:
+            SlopeStylePostProcessor._pending.discard(self)
 
     @classmethod
     def create(cls) -> "SlopeStylePostProcessor":
-        cls.instance = cls()
-        return cls.instance
+        cls._pending = {item for item in cls._pending if not sip.isdeleted(item)}
+        instance = cls()
+        cls._pending.add(instance)
+        return instance
 
-
+    @classmethod
+    def pending_count(cls) -> int:
+        """Number of instances waiting to be called (for tests)."""
+        return len(cls._pending)

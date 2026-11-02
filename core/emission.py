@@ -6,7 +6,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 """
 
 import math
-from typing import List, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsProcessingFeedback
 
@@ -18,7 +18,9 @@ from .geometry_utils import (
     unit_normal,
 )
 from .models import HachureData, HachureMode, Target
+from .polyline import Polyline
 from .tuning import (
+    CANCEL_CHECK_INTERVAL,
     KEHLE_NEAR_FACTOR,
     MIN_AVG_DIRECTION_LENGTH,
     MIN_LONG_LENGTH,
@@ -41,38 +43,49 @@ class HachureEmitter:
 
     def __init__(
         self,
-        ok_geom: QgsGeometry,
-        uk_geom: QgsGeometry,
+        crest: Polyline,
+        toe: Polyline,
         kehlen: Sequence[QgsGeometry],
         interval: float,
         short_ratio: float,
         max_search_dist: float,
+        side: float = 1.0,
     ) -> None:
-        self.ok = ok_geom
-        self.uk = uk_geom
+        self.crest = crest
+        self.toe = toe
         self.kehlen = list(kehlen)
         self.interval = interval
         self.short_ratio = short_ratio
         self.max_dist = max_search_dist
+        self.side = side  # +1: cast along the left normal first, -1: along the right one
 
     def emit(
         self,
         targets: List[Target],
         feedback: QgsProcessingFeedback,
+        progress: Optional[Callable[[float], None]] = None,
     ) -> List[HachureData]:
         result: List[HachureData] = []
+        total = len(targets)
         for index, current in enumerate(targets):
             if feedback.isCanceled():
                 break
-            if current.mode != HachureMode.KEHLE_ANKER:
+            if progress is not None and index % CANCEL_CHECK_INTERVAL == 0:
+                progress(index / total)
+            if current.mode != HachureMode.KEHLE_ANKER and current.draw_long:
                 self._emit_long(current, result)
-            if index < len(targets) - 1:
+            if index < total - 1:
                 self._emit_short(current, targets[index + 1], result)
+        if progress is not None:
+            progress(1.0)
         return result
+
+    def _crest_point(self, station: float) -> QgsPointXY:
+        return QgsPointXY(*self.crest.point_at(station))
 
     # ------------------------------------------------------------- long
     def _emit_long(self, target: Target, out: List[HachureData]) -> None:
-        start = self.ok.interpolate(target.station).asPoint()
+        start = self._crest_point(target.station)
         full_len = measure(start, target.point)
         if full_len <= MIN_LONG_LENGTH:
             return
@@ -96,7 +109,7 @@ class HachureEmitter:
             return
 
         mid_station = (current.station + following.station) / 2.0
-        mid_start = self.ok.interpolate(mid_station).asPoint()
+        mid_start = self._crest_point(mid_station)
         if is_near_any(mid_start, self.kehlen, KEHLE_NEAR_FACTOR * self.interval):
             return
 
@@ -106,9 +119,10 @@ class HachureEmitter:
         )
 
         hit = None
-        normal = unit_normal(self.ok, mid_station, self.interval)
+        normal = unit_normal(self.crest, mid_station, self.interval)
         if normal is not None:
-            hit = cast_both_ways(mid_start, normal, self.max_dist, self.uk, self.kehlen)
+            normal = (normal[0] * self.side, normal[1] * self.side)
+            hit = cast_both_ways(mid_start, normal, self.max_dist, self.toe, self.kehlen)
 
         if is_anchor:
             mode = HachureMode.KEHLE_KURZ
@@ -156,8 +170,8 @@ class HachureEmitter:
         out: List[HachureData],
     ) -> None:
         """No collision at the midpoint: average the directions of both neighbours."""
-        left_start = self.ok.interpolate(current.station).asPoint()
-        right_start = self.ok.interpolate(following.station).asPoint()
+        left_start = self._crest_point(current.station)
+        right_start = self._crest_point(following.station)
 
         v1 = (current.point.x() - left_start.x(), current.point.y() - left_start.y())
         v2 = (following.point.x() - right_start.x(), following.point.y() - right_start.y())

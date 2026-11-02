@@ -1,13 +1,26 @@
 [general]
 name=Slope Hachures (Böschungsschraffen)
 qgisMinimumVersion=3.22
-qgisMaximumVersion=3.99
+qgisMaximumVersion=4.99
 description=Engineering slope hachures and embankment ticks (RE 2012, OKSTRA 0486, DIN 2425)
-version=1.1.2
+version=1.2.0
 author=perlde
 email=perlde@gmx.de
 about=Generates slope hachures, embankment ticks, and talud hatching from crest and toe lines. Features automated cartographic styling, breakline and excavation pit support (OKSTRA 0486), automatic CRS alignment, strict attribute grouping, and full Batch / Graphical Modeler support.
-changelog=1.1.2: Engine split into modules, named tuning constants, dataclass targets. Automatic CRS transformation of all inputs. Strict NULL grouping. Toe gaps are not bridged. Write errors abort the run. Invalid parameter values are rejected instead of silently corrected. Translations loaded per locale. Post-processor kept alive. Crest ends are projected onto the toe line. Self-crossing lines are rejected. Ambiguous toe lines are reported and skipped. Tests added.
+changelog=1.2.0:
+    - QGIS 4 support: the plugin runs in QGIS 3.22 to 4.x.
+    - Closed lines: crest and toe rings (around pits or mounds) are hachured all the way round, whatever their direction and start point.
+    - Faster on long, densely digitised lines (about 3 to 8 times on lines with thousands of vertices). Results for open lines are unchanged.
+    - Only toe and breakline features near the crest lines are read.
+    - Progress bar and Cancel button respond within long crest lines.
+    - A crest section with too many stations is skipped with a warning instead of stopping the run.
+    - Fixed: in QGIS 3.22 a run could stop with "Null geometry cannot be converted to a point".
+    - Fixed: coordinate transformation between different CRS failed in QGIS 4.
+    - Fixed: the German menu name was shown in English.
+    - Fixed: crest parts that cross themselves after merging are now skipped.
+    - The standard style is applied reliably in batch mode and in models.
+    - Help: start a closed crest line at a corner where a breakline meets it.
+    1.1.2: Engine split into modules, named tuning constants, dataclass targets. Automatic CRS transformation of all inputs. Strict NULL grouping. Toe gaps are not bridged. Write errors abort the run. Invalid parameter values are rejected instead of silently corrected. Translations loaded per locale. Post-processor kept alive. Crest ends are projected onto the toe line. Self-crossing lines are rejected. Ambiguous toe lines are reported and skipped. Tests added.
 homepage=https://github.com/perlde/slope_hachures
 tracker=https://github.com/perlde/slope_hachures/issues
 repository=https://github.com/perlde/slope_hachures

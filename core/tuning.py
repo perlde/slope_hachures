@@ -45,3 +45,16 @@ AMBIGUITY_SAMPLES: Final[int] = 200     # sample points along a crest part for t
 # would stay unhatched.
 ENDPOINT_PREFERENCE: Final[float] = 1.5
 MAX_SEGMENTS_PER_CREST: Final[int] = 100_000
+
+# Closed lines (rings)
+# A line whose end lies within this distance of its start is treated as a ring.
+RING_CLOSE_TOLERANCE: Final[float] = 0.05
+# Crest sample points used to decide the toe direction when crest or toe is a ring
+# but not both (for two rings the winding is compared instead).
+ORIENTATION_SAMPLES: Final[int] = 24
+
+# Performance
+# Toe lines with at least this many segments get a spatial index for ray queries.
+SPATIAL_INDEX_MIN_SEGMENTS: Final[int] = 64
+# The cancel button is checked every this many crest stations.
+CANCEL_CHECK_INTERVAL: Final[int] = 16

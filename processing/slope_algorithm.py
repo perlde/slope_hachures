@@ -9,12 +9,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsFeature,
+    QgsFeatureRequest,
     QgsFeatureSink,
     QgsField,
     QgsFields,
@@ -28,11 +31,12 @@ from qgis.core import (
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterField,
     QgsProcessingParameterNumber,
+    QgsRectangle,
     QgsSpatialIndex,
     QgsUnitTypes,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType, QVariant
 from qgis.PyQt.QtGui import QIcon
 
 from ..common import is_german_locale, plugin_icon
@@ -49,6 +53,29 @@ from ..core.tuning import (
     MIN_SHORT_RATIO,
 )
 from .styling import SlopeStylePostProcessor
+
+# QgsField takes QMetaType types from QGIS 3.38; QVariant types are deprecated there.
+_USE_QMETATYPE = Qgis.QGIS_VERSION_INT >= 33800
+# Relative padding of a search window after reprojection into another CRS.
+_WINDOW_REPROJECTION_PADDING = 0.01
+
+
+def _operation_succeeded(result: Any) -> bool:
+    """True if a QgsGeometry operation returned Success (value 0).
+
+    PyQt5 enums are ints, PyQt6 enums (QGIS 4) are not: comparing them with 0
+    directly would report every transformation as failed there.
+    """
+    return int(getattr(result, "value", result)) == 0
+
+
+@dataclass(frozen=True)
+class _CrestItem:
+    """A validated crest feature, read once before the processing loop."""
+
+    fid: int
+    geometry: QgsGeometry
+    group: Any
 
 
 @dataclass(frozen=True)
@@ -130,7 +157,9 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
                 "<ul>"
                 "  <li><b>Baugruben:</b> Zeichne an den 4 Grubenecken diagonale Linien "
                 "      im Kehlen-Layer (von Außenecke zu Innenecke). Das Werkzeug setzt "
-                "      die Böschungswände dort ohne Überschneidungen an.</li>"
+                "      die Böschungswände dort ohne Überschneidungen an. Beginne eine "
+                "      geschlossene Oberkante an einer dieser Ecken: Liegt ihr Anfangspunkt "
+                "      0,25 – 2,5 m neben einer Kehle, können sich dort einzelne Schraffen kreuzen.</li>"
                 "  <li><b>Kantenüberhänge:</b> Trifft eine senkrecht zum Kamm gezogene "
                 "      Schraffe die Unterkante nicht mehr, weil diese vorher endet, setze an "
                 "      dieser Stelle eine Randkehle. Ohne Kehle können Schraffen dort falsch verlaufen.</li>"
@@ -163,7 +192,9 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             "<ul>"
             "  <li><b>Excavation Pits:</b> Draw corner diagonals in the breakline layer "
             "      (from outer to inner corners). The tool sets the slope faces "
-            "      without overlapping hachures.</li>"
+            "      without overlapping hachures. Start a closed crest line at one of "
+            "      these corners: if its first vertex lies 0.25 – 2.5 m beside a breakline, "
+            "      single hachures can cross there.</li>"
             "  <li><b>Terraced Slopes (Berms):</b> Calculate multi-level embankments "
             "      stepwise (Step 1: Crest &rarr; Berm; Step 2: Berm &rarr; Toe).</li>"
             "  <li><b>Edge overhangs:</b> If a hachure drawn perpendicular to the crest no longer "
@@ -270,13 +301,21 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
                 SlopeStylePostProcessor.create()
             )
 
+        # Crest features are read and validated once. Their extent limits what is
+        # loaded from the toe and breakline layers.
+        crests = self._read_crests(ok_source, ok_group_idx, feedback)
+        if not crests:
+            feedback.pushInfo(self.tr("Done: {count} elements created.").format(count=0))
+            return {self.OUTPUT: dest_id}
+        window = self._search_window(crests, max_dist)
+
         transform_ctx = context.transformContext()
         uk_index = self._build_index(
-            uk_source, uk_group_idx, ok_crs, transform_ctx, feedback, role_toe,
+            uk_source, uk_group_idx, ok_crs, transform_ctx, feedback, role_toe, window,
         )
         if kehlen_source is not None:
             kehlen_index = self._build_index(
-                kehlen_source, -1, ok_crs, transform_ctx, feedback, role_kehle,
+                kehlen_source, -1, ok_crs, transform_ctx, feedback, role_kehle, window,
             )
         else:
             kehlen_index = _LineIndex({}, QgsSpatialIndex())
@@ -287,41 +326,129 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             max_search_dist=max_dist,
         )
 
-        total = ok_source.featureCount()
+        total = len(crests)
         created = 0
         written_kehlen: Set[int] = set()
 
-        for position, ok_feat in enumerate(ok_source.getFeatures()):
+        for position, crest in enumerate(crests):
             if feedback.isCanceled():
                 break
-            if total > 0:
-                feedback.setProgress(min(99, int(100.0 * position / total)))
-            if not ok_feat.hasGeometry():
-                continue
-            ok_geom = ok_feat.geometry()
-            if ok_geom.isEmpty() or not ok_geom.isGeosValid() or has_self_intersection(ok_geom):
-                feedback.pushWarning(self.tr(
-                    "Skipping invalid crest feature ID {}."
-                ).format(ok_feat.id()))
-                continue
+            feedback.setProgress(min(99.0, 100.0 * position / total))
 
-            ok_fid = int(ok_feat.id())
-            ok_group = ok_feat.attributes()[ok_group_idx] if ok_group_idx >= 0 else None
-
-            for part in self._linear_parts(ok_geom):
+            parts = self._linear_parts(crest.geometry)
+            merged = crest.geometry.isMultipart()
+            for part_no, part in enumerate(parts):
+                if feedback.isCanceled():
+                    break
+                if merged and has_self_intersection(part):
+                    # Each part was valid, but merging the parts made a line that crosses itself.
+                    feedback.pushWarning(self.tr(
+                        "Skipping invalid crest feature ID {}."
+                    ).format(crest.fid))
+                    continue
                 if part.length() / interval > MAX_SEGMENTS_PER_CREST:
-                    raise QgsProcessingException(self.tr(
-                        "Interval too small for crest feature ID {}: "
-                        "more than {} stations would be created."
-                    ).format(ok_fid, MAX_SEGMENTS_PER_CREST))
+                    feedback.pushWarning(self.tr(
+                        "Interval too small for crest feature ID {}: more than {} stations "
+                        "would be created. The crest section was skipped."
+                    ).format(crest.fid, MAX_SEGMENTS_PER_CREST))
+                    continue
+                progress = self._part_progress(feedback, position, part_no, len(parts), total)
                 created += self._process_part(
-                    sink, fields, engine, part, ok_fid, ok_group,
+                    sink, fields, engine, part, crest.fid, crest.group,
                     uk_index, kehlen_index, group_field, max_dist,
-                    written_kehlen, feedback,
+                    written_kehlen, feedback, progress,
                 )
 
         feedback.pushInfo(self.tr("Done: {count} elements created.").format(count=created))
         return {self.OUTPUT: dest_id}
+
+    # ----------------------------------------------------------- input reading
+    def _read_crests(
+        self,
+        source: QgsProcessingFeatureSource,
+        group_idx: int,
+        feedback: QgsProcessingFeedback,
+    ) -> List[_CrestItem]:
+        """Reads the crest features (geometry and grouping value only) and validates them."""
+        crests: List[_CrestItem] = []
+        for feat in source.getFeatures(self._attribute_request(group_idx)):
+            if feedback.isCanceled():
+                break
+            if not feat.hasGeometry():
+                continue
+            geom = feat.geometry()
+            if geom.isEmpty() or not geom.isGeosValid() or has_self_intersection(geom):
+                feedback.pushWarning(self.tr(
+                    "Skipping invalid crest feature ID {}."
+                ).format(feat.id()))
+                continue
+            group = feat.attributes()[group_idx] if group_idx >= 0 else None
+            crests.append(_CrestItem(int(feat.id()), geom, group))
+        return crests
+
+    @staticmethod
+    def _attribute_request(group_idx: int) -> QgsFeatureRequest:
+        """Request that fetches the geometry and, if set, only the grouping column."""
+        request = QgsFeatureRequest()
+        if group_idx >= 0:
+            request.setSubsetOfAttributes([group_idx])
+        else:
+            request.setNoAttributes()
+        return request
+
+    @staticmethod
+    def _search_window(crests: List[_CrestItem], max_dist: float) -> Optional[QgsRectangle]:
+        """Extent of all crest features, grown by the search distance (crest CRS).
+
+        Computed from the features themselves rather than the layer metadata, which
+        can be estimated or outdated (e.g. PostGIS). None if there is no crest.
+        """
+        window: Optional[QgsRectangle] = None
+        for crest in crests:
+            box = crest.geometry.boundingBox()
+            if window is None:
+                window = QgsRectangle(box)
+            else:
+                window.combineExtentWith(box)
+        if window is not None:
+            window.grow(max_dist)
+        return window
+
+    @staticmethod
+    def _window_in_crs(
+        window: Optional[QgsRectangle],
+        window_crs: QgsCoordinateReferenceSystem,
+        source_crs: QgsCoordinateReferenceSystem,
+        transform_context,
+    ) -> Optional[QgsRectangle]:
+        """The search window in the CRS of another layer, or None (= no spatial filter)."""
+        if window is None:
+            return None
+        if source_crs == window_crs:
+            return QgsRectangle(window)
+        try:
+            transform = QgsCoordinateTransform(window_crs, source_crs, transform_context)
+            rect = transform.transformBoundingBox(window)
+        except QgsCsException:
+            return None  # the per-feature transformation reports the real problem
+        if rect.isNull() or rect.isEmpty():
+            return None
+        rect.grow(_WINDOW_REPROJECTION_PADDING * max(rect.width(), rect.height()))
+        return rect
+
+    @staticmethod
+    def _part_progress(
+        feedback: QgsProcessingFeedback,
+        position: int,
+        part_no: int,
+        part_count: int,
+        total: int,
+    ) -> Callable[[float], None]:
+        """Maps the progress of one crest part into the overall progress bar."""
+        def report(fraction: float) -> None:
+            done = position + (part_no + fraction) / part_count
+            feedback.setProgress(min(99.0, 100.0 * done / total))
+        return report
 
     # ----------------------------------------------------------- per crest part
     def _process_part(
@@ -338,6 +465,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
         max_dist: float,
         written_kehlen: Set[int],
         feedback: QgsProcessingFeedback,
+        progress: Optional[Callable[[float], None]] = None,
     ) -> int:
         """Computes the hachures of one crest part and writes them. Returns the count."""
         uk_geom, reason = self._resolve_local_uk(
@@ -348,11 +476,14 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             return 0
 
         kehlen_hits = self._resolve_local_kehlen(part, kehlen_index, max_dist)
+        # validate=False: crest, toe and breakline features were validated when read.
         results = engine.compute_hachures(
             ok_geom=part,
             uk_geom=uk_geom,
             kehlen_geoms=[hit.geometry for hit in kehlen_hits],
             feedback=feedback,
+            validate=False,
+            progress=progress,
         )
 
         written = 0
@@ -399,7 +530,7 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(self.tr(
                 "Layer '{}' ({}) uses CRS units other than meters ({}). "
                 "Please reproject to a metric CRS."
-            ).format(name, role, crs.mapUnits()))
+            ).format(name, role, QgsUnitTypes.toString(crs.mapUnits())))
         return crs
 
     def _group_index(
@@ -425,19 +556,30 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
         transform_context,
         feedback: QgsProcessingFeedback,
         role: str,
+        window: Optional[QgsRectangle] = None,
     ) -> _LineIndex:
         """Loads lines, transforms them to the target CRS if needed, and indexes them.
 
-        Index keys are sequential numbers, so empty or duplicate source IDs
-        cannot overwrite each other.
+        Only features within the search window (target CRS) are requested, and only
+        the grouping column. Index keys are sequential numbers, so empty or duplicate
+        source IDs cannot overwrite each other.
         """
         transform: Optional[QgsCoordinateTransform] = None
         if source.sourceCrs() != target_crs:
             transform = QgsCoordinateTransform(source.sourceCrs(), target_crs, transform_context)
+            if not transform.isValid():
+                raise QgsProcessingException(self.tr(
+                    "No valid coordinate transformation from layer '{}' ({}) to the crest CRS."
+                ).format(source.sourceName(), role))
+
+        request = self._attribute_request(group_idx)
+        rect = self._window_in_crs(window, target_crs, source.sourceCrs(), transform_context)
+        if rect is not None:
+            request.setFilterRect(rect)
 
         items: Dict[int, _IndexedLine] = {}
         index = QgsSpatialIndex()
-        for feat in source.getFeatures():
+        for feat in source.getFeatures(request):
             if feedback.isCanceled():
                 break
             if not feat.hasGeometry():
@@ -445,10 +587,15 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
             geom = feat.geometry()
             if geom.isEmpty():
                 continue
-            if transform is not None and geom.transform(transform) != 0:
-                raise QgsProcessingException(self.tr(
-                    "Coordinate transformation failed for layer '{}' ({}), feature {}."
-                ).format(source.sourceName(), role, feat.id()))
+            if transform is not None:
+                try:
+                    failed = not _operation_succeeded(geom.transform(transform))
+                except QgsCsException:
+                    failed = True
+                if failed:
+                    raise QgsProcessingException(self.tr(
+                        "Coordinate transformation failed for layer '{}' ({}), feature {}."
+                    ).format(source.sourceName(), role, feat.id()))
             if not geom.isGeosValid() or has_self_intersection(geom):
                 feedback.pushWarning(self.tr(
                     "Skipping invalid feature ID {} in layer '{}'."
@@ -557,9 +704,10 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
         if length <= 0.0:
             return False
         for k in range(AMBIGUITY_SAMPLES + 1):
-            point = QgsGeometry.fromPointXY(
-                ok_geom.interpolate(length * k / AMBIGUITY_SAMPLES).asPoint()
-            )
+            # Clamped: length * k / n can exceed length by rounding (about 8 % of all
+            # lengths for k = n), and QGIS 3.22 then returns a null geometry.
+            station = min(length, length * k / AMBIGUITY_SAMPLES)
+            point = QgsGeometry.fromPointXY(ok_geom.interpolate(station).asPoint())
             d_toe = point.distance(toe)
             for other in others:
                 d_other = point.distance(other)
@@ -598,13 +746,17 @@ class SlopeHachuresAlgorithm(QgsProcessingAlgorithm):
 
     @staticmethod
     def _build_output_fields() -> QgsFields:
+        if _USE_QMETATYPE:
+            int64, text, real = QMetaType.Type.LongLong, QMetaType.Type.QString, QMetaType.Type.Double
+        else:
+            int64, text, real = QVariant.LongLong, QVariant.String, QVariant.Double
         fields = QgsFields()
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_OK_FID, QVariant.LongLong))
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_TYP, QVariant.String))
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_STATION, QVariant.Double))
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_LEN_GEZ, QVariant.Double))
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_LEN_GES, QVariant.Double))
-        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_MODUS, QVariant.String))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_OK_FID, int64))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_TYP, text))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_STATION, real))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_LEN_GEZ, real))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_LEN_GES, real))
+        fields.append(QgsField(SlopeHachuresAlgorithm.FIELD_MODUS, text))
         return fields
 
     def _write(
