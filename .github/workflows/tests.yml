@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "update/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  qgis:
+    name: QGIS ${{ matrix.qgis }}
+    runs-on: ubuntu-latest
+    # "latest" is the QGIS development version (currently 4.x): informative only
+    continue-on-error: ${{ matrix.qgis == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        qgis: [release-3_22, ltr, latest]
+    container:
+      image: qgis/qgis:${{ matrix.qgis }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: QGIS version
+        run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+  qt6-check:
+    # The check that plugins.qgis.org runs on upload ("Qt6 Check" tab), on the plugin
+    # files only (tests/ is not part of the plugin ZIP). Findings appear as warnings.
+    name: Qt6 compatibility (pyqgis4-checker)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read  # the runner logs in to ghcr.io to pull the image
+    container:
+      image: ghcr.io/qgis/pyqgis4-checker:main-ubuntu
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PyQGIS 4 migration check
+        run: |
+          plugin_dir="$(mktemp -d)/slope_hachures"
+          mkdir -p "$plugin_dir"
+          tar --exclude=./.git --exclude=./.github --exclude=./tests -cf - . | tar -xf - -C "$plugin_dir"
+          test -f "$plugin_dir/plugin.py" && test -f "$plugin_dir/core/slope_engine.py"
+          echo "Checking $(find "$plugin_dir" -name '*.py' | wc -l) Python files"
+          pyqt5_to_pyqt6.py --dry_run --logfile pyqt6_checker.log "$plugin_dir/" || true
+          if [ -s pyqt6_checker.log ]; then
+            grep -v '^===' pyqt6_checker.log | sed "s|$plugin_dir/||g" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::warning title=Qt6 check::$line"
+            done
+          fi
+          # fails if the script would change anything
+          pyqt5_to_pyqt6.py "$plugin_dir/"
